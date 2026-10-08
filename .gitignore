@@ -1,0 +1,13 @@
+# Build output and caches
+/.gradle
+/.gradle-home
+/.kotlin
+/build
+/app/build
+/local.properties
+
+# Personal settings and the signing key: never commit these
+/local.env
+/release.keystore
+*.keystore
+*.jks
