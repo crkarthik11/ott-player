@@ -29,6 +29,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -247,9 +248,17 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- data
 
+    /**
+     * Runs [work] on the io thread. Results posted back to the main thread can arrive
+     * after onDestroy has shut the executor down; those are dropped instead of crashing.
+     */
+    private fun onIo(work: () -> Unit) {
+        if (!io.isShutdown) io.execute(work)
+    }
+
     /** Runs on the io thread: shows the cached playlist straight away, then refreshes it. */
     private fun loadData() {
-        io.execute {
+        onIo {
             fun parse() = store.cached(FULL_FILE)
                 ?.let { f -> runCatching { M3u.parse(f.readText()) }.getOrNull() }
                 ?.takeIf { it.channels.isNotEmpty() }
@@ -269,7 +278,7 @@ class MainActivity : Activity() {
                     val delay = when (loadFailures++) { 0 -> 2_000L; 1 -> 5_000L; else -> 10_000L }
                     main.post { showStatus("Can’t reach the server. Retrying…") }
                     main.postDelayed({ loadData() }, delay)
-                    return@execute
+                    return@onIo
                 }
             }
             loadFailures = 0
@@ -281,7 +290,7 @@ class MainActivity : Activity() {
     private fun requestGuide() {
         val ids = HashSet<String>()
         groups.forEach { g -> g.channels.forEach { ids.add(it.id) } }
-        if (ids.isNotEmpty()) io.execute { loadGuide(ids) }
+        if (ids.isNotEmpty()) onIo { loadGuide(ids) }
     }
 
     /**
@@ -291,7 +300,10 @@ class MainActivity : Activity() {
      */
     private fun loadGuide(ids: Set<String>) {
         val trimmed = File(filesDir, TRIMMED_GUIDE_FILE)
-        if (guide == null) Guide.load(trimmed)?.let { g -> main.post { setGuide(g) } }
+        // [guide] is only set once the main thread gets to setGuide, so track here
+        // whether a guide exists; otherwise a cold start re-parses the full file.
+        var have = guide != null
+        if (!have) Guide.load(trimmed)?.let { g -> have = true; main.post { setGuide(g) } }
         val changed = try {
             store.refresh(BuildConfig.GUIDE_URL, GUIDE_FILE) { f -> f.inputStream().use { it.read() == 0x1f && it.read() == 0x8b } }
         } catch (_: Exception) {
@@ -299,7 +311,7 @@ class MainActivity : Activity() {
         }
         // Re-trim when the guide or the set of shown channels changed.
         val idsKey = ids.sorted().joinToString(",").hashCode()
-        if (!changed && guide != null && prefs.getInt("guideIds", 0) == idsKey) return
+        if (!changed && have && prefs.getInt("guideIds", 0) == idsKey) return
         val raw = store.cached(GUIDE_FILE) ?: return
         val now = System.currentTimeMillis()
         val g = runCatching { raw.inputStream().use { Guide.parse(it, ids, now - 3 * HOUR, now + 36 * HOUR) } }.getOrNull() ?: return
@@ -407,7 +419,7 @@ class MainActivity : Activity() {
         // JioTV serves most channels as DASH with Widevine, but about a fifth as plain
         // HLS (".m3u8", no DRM). Reading HLS as DASH fails with "manifest malformed".
         val hls = ch.mpd.substringBefore('?').endsWith(".m3u8")
-        val b = MediaItem.Builder().setUri(cached ?: Uri.parse(ch.mpd))
+        val b = MediaItem.Builder().setMediaId(ch.id).setUri(cached ?: Uri.parse(ch.mpd))
             .setMimeType(if (hls) MimeTypes.APPLICATION_M3U8 else MimeTypes.APPLICATION_MPD)
         if (!hls) ch.license?.let { b.setDrmConfiguration(MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID).setLicenseUri(it).build()) }
         return b.build()
@@ -535,7 +547,11 @@ class MainActivity : Activity() {
         override fun onLoadCompleted(eventTime: AnalyticsListener.EventTime, info: LoadEventInfo, data: MediaLoadData) {
             if (data.dataType != C.DATA_TYPE_MANIFEST) return
             if (zapStart != 0L && zapManifest == 0L) zapManifest = SystemClock.elapsedRealtime() - zapStart
-            val ch = playing ?: return
+            // While CH+ is held, [playing] already names the next channel but the old
+            // stream keeps refreshing its manifest; take the channel from the event itself.
+            if (eventTime.timeline.isEmpty) return
+            val id = eventTime.timeline.getWindow(eventTime.windowIndex, Timeline.Window()).mediaItem.mediaId
+            val ch = playlist?.byId?.get(id) ?: return
             if (info.uri.toString() != ch.mpd) resolved[ch.id] = info.uri to SystemClock.elapsedRealtime()
         }
 
