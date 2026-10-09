@@ -9,9 +9,12 @@ import android.content.SharedPreferences
  */
 class Catalog(private val prefs: SharedPreferences) {
 
-    var languages: MutableSet<String> = prefs.getString("languages", null)
-        ?.split(',')?.filter { it.isNotEmpty() }?.toMutableSet()
-        ?: DEFAULT_LANGUAGES.toMutableSet()
+    /** The languages chosen in Settings, or null if never chosen. */
+    private var chosen: Set<String>? = prefs.getString("languages", null)
+        ?.split(',')?.filter { it.isNotEmpty() }?.toSet()
+
+    /** The languages shown for the current playlist; see [build]. */
+    var languages: MutableSet<String> = (chosen ?: DEFAULT_LANGUAGES).toMutableSet()
         private set
 
     var genresOff: MutableSet<String> = prefs.getString("genresOff", "")!!
@@ -19,6 +22,7 @@ class Catalog(private val prefs: SharedPreferences) {
         private set
 
     fun save(languages: Set<String>, genresOff: Set<String>) {
+        chosen = languages
         this.languages = languages.toMutableSet()
         this.genresOff = genresOff.toMutableSet()
         prefs.edit()
@@ -30,6 +34,11 @@ class Catalog(private val prefs: SharedPreferences) {
     fun shows(ch: Channel) = ch.language in languages && ch.genre !in genresOff
 
     fun build(full: Playlist, favourites: Collection<String>): List<Group> {
+        // The chosen (or default) languages that this playlist has. A playlist with none
+        // of them, like most generic ones, where every channel's language is "Other",
+        // shows all its languages rather than nothing.
+        val present = full.channels.map { it.language }.toSet()
+        languages = (chosen ?: DEFAULT_LANGUAGES).filter { it in present }.ifEmpty { present }.toMutableSet()
         val out = ArrayList<Group>()
         val favs = favourites.mapNotNull { full.byId[it] }
         if (favs.isNotEmpty()) out.add(Group("Favourites", favs, custom = true, label = "★ Favourites"))

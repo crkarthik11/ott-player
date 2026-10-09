@@ -63,10 +63,21 @@ class Guide private constructor(private val byChannel: Map<String, List<Programm
             }
         }.getOrNull()
 
-        /** Streams a gzipped XMLTV file; programmes outside [from, to) are dropped. */
+        /** True for a gzipped file, or one that starts like XML. */
+        fun looksValid(file: File): Boolean = file.inputStream().use { input ->
+            val head = ByteArray(64)
+            val n = input.read(head)
+            n >= 2 && ((head[0] == 0x1f.toByte() && head[1] == 0x8b.toByte()) || String(head, 0, n).trimStart('\uFEFF', ' ', '\t', '\r', '\n').startsWith("<"))
+        }
+
+        /** Streams an XMLTV file, gzipped or not; programmes outside [from, to) are dropped. */
         fun parse(input: InputStream, ids: Set<String>, from: Long, to: Long): Guide {
             val parser = Xml.newPullParser()
-            parser.setInput(GZIPInputStream(BufferedInputStream(input, 64 * 1024)), "UTF-8")
+            val buffered = BufferedInputStream(input, 64 * 1024)
+            buffered.mark(2)
+            val gzipped = buffered.read() == 0x1f && buffered.read() == 0x8b
+            buffered.reset()
+            parser.setInput(if (gzipped) GZIPInputStream(buffered) else buffered, "UTF-8")
             val map = HashMap<String, ArrayList<Programme>>()
             var channel: String? = null
             var start = 0L

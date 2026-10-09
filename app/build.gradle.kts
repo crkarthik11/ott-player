@@ -3,10 +3,10 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val fullPlaylistUrl = providers.gradleProperty("fullPlaylistUrl")
-    .getOrElse("https://jiotv.example.lan/playlist.m3u")
-val guideUrl = providers.gradleProperty("guideUrl")
-    .getOrElse("https://jiotv.example.lan/epg.xml.gz")
+// Optional starting playlist and guide. Without a playlist, the app opens its setup
+// screen, where one is entered from a phone; whatever is entered there wins.
+val fullPlaylistUrl = providers.gradleProperty("fullPlaylistUrl").getOrElse("")
+val guideUrl = providers.gradleProperty("guideUrl").getOrElse("")
 val musicListName = providers.gradleProperty("musicListName").getOrElse("Music mix")
 val keystorePassword: String? = System.getenv("OTT_KEYSTORE_PASSWORD")
 
@@ -67,4 +67,8 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-dash:$media3")
     implementation("androidx.media3:media3-exoplayer-hls:$media3")
     implementation("androidx.media3:media3-ui:$media3")
+    // QR codes for the setup page (encoder only; R8 drops the rest).
+    implementation("com.google.zxing:core:3.5.3")
+
+    testImplementation("junit:junit:4.13.2")
 }

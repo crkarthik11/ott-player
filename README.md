@@ -1,15 +1,19 @@
 # OTT Player
 
-A small, fast Android TV app for watching live channels from a self-hosted
-[JioTV Go](https://github.com/jiotv-go/jiotv_go) server with your own Jio subscription:
-full-screen live TV, a home page with language tabs, a bottom channel panel, and a
-guide. About 1 MB, built on Media3 ExoPlayer with plain Android views. No analytics.
+A small, fast Android TV app for watching live channels from any M3U playlist, such
+as a self-hosted [JioTV Go](https://github.com/jiotv-go/jiotv_go) server with your own
+Jio subscription: full-screen live TV, a home page with tabs, a bottom channel panel,
+and a guide. About 1 MB, built on Media3 ExoPlayer with plain Android views. No
+analytics, no ads, nothing locked.
 
-It plays what your JioTV Go server serves: DASH channels with Widevine (decrypted by
-the TV itself, as any licensed player does) and plain HLS channels. It does not
-bypass or remove DRM.
+It plays DASH channels with Widevine (decrypted by the TV itself, as any licensed
+player does), HLS, and MPEG-TS streams. It does not bypass or remove DRM.
 
 ## Features
+
+- **Setup from your phone:** on first start the TV shows a QR code. Scan it, paste
+  your playlist's URL (and a guide URL if the playlist doesn't name one), tap Save,
+  and the TV loads it. Change it later under Settings → Playlist & guide.
 
 - **Home page:** your last channel keeps playing in a live preview. Tabs for
   ★ For you (Recent channels, Favourites, a music mix), All channels, each language,
@@ -69,10 +73,11 @@ The build reads these optional settings from `local.env` (or the environment):
 
 | Setting | Default |
 |---|---|
-| `OTT_PLAYLIST_URL` | `https://jiotv.example.lan/playlist.m3u` |
-| `OTT_GUIDE_URL` | `https://jiotv.example.lan/epg.xml.gz` |
+| `OTT_PLAYLIST_URL` | none: the app asks for one on first start |
+| `OTT_GUIDE_URL` | none: the guide named in the playlist (`x-tvg-url`), if any |
 | `OTT_MUSIC_LIST_NAME` | `Music mix` |
 | `OTT_TV` | none (needed for `install`) |
 
-The playlist should come from a JioTV Go instance with DRM enabled, served over
+The playlist and guide URLs are only a starting point: once a playlist is entered on
+the TV, that one is used. For JioTV Go, use an instance with DRM enabled, served over
 HTTPS so Widevine licence requests work.

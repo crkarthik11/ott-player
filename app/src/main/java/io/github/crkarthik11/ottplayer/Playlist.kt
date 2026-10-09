@@ -1,6 +1,10 @@
 package io.github.crkarthik11.ottplayer
 
-/** One channel from an M3U. [num] is its 1-based position in the full playlist, used for number entry. */
+/**
+ * One channel from an M3U. [num] is its 1-based position in the full playlist, used for
+ * number entry. [mpd] is the stream URL, whatever its format; [dash] says it is DASH
+ * (from a Kodi manifest_type line, a licence key, or a ".mpd" path).
+ */
 class Channel(
     val id: String,
     val name: String,
@@ -10,6 +14,7 @@ class Channel(
     val license: String?,
     val num: Int,
     val logo: String?,
+    val dash: Boolean = false,
 ) {
     val initials: String = initialsOf(name)
 }
@@ -26,7 +31,8 @@ class Group(
     val label: String = name,
 )
 
-class Playlist(val channels: List<Channel>) {
+/** [guideUrl] is the guide named in the playlist's header (x-tvg-url or url-tvg), if any. */
+class Playlist(val channels: List<Channel>, val guideUrl: String? = null) {
     val byId: Map<String, Channel> = channels.associateBy { it.id }
 }
 
@@ -38,20 +44,29 @@ object M3u {
 
     fun parse(text: String): Playlist {
         val out = ArrayList<Channel>()
+        var guideUrl: String? = null
         var info: Map<String, String>? = null
         var name = ""
         var license: String? = null
+        var manifest: String? = null
         for (raw in text.lineSequence()) {
             val line = raw.trim()
             when {
+                // Some playlists list several guides, comma-separated; the first is used.
+                line.startsWith("#EXTM3U") -> attrs(line).let { a ->
+                    guideUrl = (a["x-tvg-url"] ?: a["url-tvg"])?.substringBefore(',')?.trim()?.ifBlank { null }
+                }
                 line.startsWith("#EXTINF") -> {
                     info = attrs(line)
                     name = line.substringAfterLast(',').trim()
                     license = null
+                    manifest = null
                 }
                 // Kodi's form may append "|headers|..." after the URL.
                 line.startsWith("#KODIPROP:inputstream.adaptive.license_key=") ->
                     license = line.substringAfter('=').substringBefore('|').ifBlank { null }
+                line.startsWith("#KODIPROP:inputstream.adaptive.manifest_type=") ->
+                    manifest = line.substringAfter('=').trim().lowercase()
                 line.isEmpty() || line.startsWith("#") -> Unit
                 else -> info?.let { a ->
                     out.add(
@@ -64,13 +79,14 @@ object M3u {
                             license = license,
                             num = out.size + 1,
                             logo = a["tvg-logo"]?.ifBlank { null },
+                            dash = manifest == "mpd" || license != null || line.substringBefore('?').endsWith(".mpd"),
                         ),
                     )
                     info = null
                 }
             }
         }
-        return Playlist(out)
+        return Playlist(out, guideUrl)
     }
 }
 

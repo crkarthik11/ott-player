@@ -20,6 +20,7 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -74,6 +75,7 @@ class MainActivity : Activity() {
         class Chan(val ch: Channel) : Item()
         class Cat(val group: Int) : Item()
         object Settings : Item()
+        object Sources : Item()
     }
 
     private class HomeRow(val label: String, val items: List<Item>)
@@ -84,6 +86,10 @@ class MainActivity : Activity() {
     private lateinit var prefs: SharedPreferences
     private lateinit var catalog: Catalog
 
+    // Where the playlist and guide come from, and a counter that makes results still
+    // arriving for a previous source be ignored.
+    private lateinit var source: Source
+    private var sourceGen = 0
     private var playlist: Playlist? = null
     @Volatile private var loadFailures = 0
     @Volatile private var guide: Guide? = null
@@ -135,6 +141,9 @@ class MainActivity : Activity() {
     private var genreOrder: List<String> = emptyList()
     private var pairCounts: Map<Pair<String, String>, Int> = emptyMap()
 
+    private var setupOpen = false
+    private var setupServer: SetupServer? = null
+
     private lateinit var homeBg: View
     private lateinit var homeView: View
     private lateinit var playerView: PlayerView
@@ -161,6 +170,13 @@ class MainActivity : Activity() {
     private lateinit var sLangPos: TextView
     private lateinit var sGenrePos: TextView
     private lateinit var sPreview: TextView
+    private lateinit var setupView: View
+    private lateinit var suTitle: TextView
+    private lateinit var suSteps: TextView
+    private lateinit var suAddress: TextView
+    private lateinit var suCurrent: TextView
+    private lateinit var suHint: TextView
+    private lateinit var suQr: ImageView
     private lateinit var status: TextView
     private lateinit var hints: View
     private lateinit var note: TextView
@@ -219,14 +235,20 @@ class MainActivity : Activity() {
         catalog = Catalog(prefs)
         prefs.getString("favourites", "")!!.split(',').filterTo(favourites) { it.isNotEmpty() }
         prefs.getString("recent", "")!!.split(',').filterTo(recent) { it.isNotEmpty() }
+        // Set on the TV (see SetupServer); the build's URLs are only the starting point.
+        source = Source(
+            prefs.getString("playlistUrl", null) ?: BuildConfig.FULL_PLAYLIST_URL,
+            prefs.getString("guideUrl", null) ?: BuildConfig.GUIDE_URL,
+        )
         bindViews()
         showHome()
         hr = 1
-        loadData()
+        if (source.playlistUrl.isEmpty()) openSetup() else loadData()
     }
 
     override fun onStart() {
         super.onStart()
+        if (setupOpen) { setupServer?.start(); renderSetup() }
         createPlayer()
         playing?.let { load(it) }
         main.post(tick)
@@ -236,6 +258,7 @@ class MainActivity : Activity() {
     override fun onStop() {
         super.onStop()
         for (r in listOf(startRun, retryRun, stallRun, loadingRun, tick, refreshData)) main.removeCallbacks(r)
+        setupServer?.stop()
         player?.release()
         player = null
     }
@@ -243,6 +266,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         main.removeCallbacksAndMessages(null)
+        setupServer?.stop()
         io.shutdownNow()
     }
 
@@ -258,39 +282,46 @@ class MainActivity : Activity() {
 
     /** Runs on the io thread: shows the cached playlist straight away, then refreshes it. */
     private fun loadData() {
+        val url = source.playlistUrl
+        if (url.isEmpty()) return
+        val gen = sourceGen
+        fun onMain(work: () -> Unit) = main.post { if (gen == sourceGen) work() }
         onIo {
             fun parse() = store.cached(FULL_FILE)
                 ?.let { f -> runCatching { M3u.parse(f.readText()) }.getOrNull() }
                 ?.takeIf { it.channels.isNotEmpty() }
 
             var full = parse()
-            full?.let { f -> main.post { setPlaylist(f) } }
+            full?.let { f -> onMain { setPlaylist(f) } }
             try {
-                val changed = store.refresh(BuildConfig.FULL_PLAYLIST_URL, FULL_FILE) { M3u.parse(it.readText()).channels.isNotEmpty() }
+                val changed = store.refresh(url, FULL_FILE) { M3u.parse(it.readText()).channels.isNotEmpty() }
                 if (changed || full == null) {
                     full = parse()
-                    full?.let { f -> main.post { setPlaylist(f) } }
+                    full?.let { f -> onMain { setPlaylist(f) } }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "playlist download failed (attempt ${loadFailures + 1})", e)
                 if (full == null) {
                     // Nothing cached yet: retry soon, since this is usually the network still coming up.
                     val delay = when (loadFailures++) { 0 -> 2_000L; 1 -> 5_000L; else -> 10_000L }
-                    main.post { showStatus("Can’t reach the server. Retrying…") }
-                    main.postDelayed({ loadData() }, delay)
+                    onMain { showStatus("Can’t load the playlist. Retrying…  ·  OK to change it") }
+                    main.postDelayed({ if (gen == sourceGen) loadData() }, delay)
                     return@onIo
                 }
             }
             loadFailures = 0
-            main.post { requestGuide() }
+            onMain { requestGuide() }
         }
     }
 
     /** Trims the guide to the channels currently shown, on the io thread. */
     private fun requestGuide() {
+        // The guide set on the TV, else the one the playlist names, else none.
+        val url = source.guideUrl.ifEmpty { playlist?.guideUrl.orEmpty() }
         val ids = HashSet<String>()
         groups.forEach { g -> g.channels.forEach { ids.add(it.id) } }
-        if (ids.isNotEmpty()) onIo { loadGuide(ids) }
+        val gen = sourceGen
+        if (ids.isNotEmpty() && url.isNotEmpty()) onIo { loadGuide(ids, url, gen) }
     }
 
     /**
@@ -298,14 +329,15 @@ class MainActivity : Activity() {
      * day) is only downloaded when it changed; it's then trimmed to the shown
      * channels and saved small, so normal starts never touch the big file.
      */
-    private fun loadGuide(ids: Set<String>) {
+    private fun loadGuide(ids: Set<String>, url: String, gen: Int) {
+        fun onMain(work: () -> Unit) = main.post { if (gen == sourceGen) work() }
         val trimmed = File(filesDir, TRIMMED_GUIDE_FILE)
         // [guide] is only set once the main thread gets to setGuide, so track here
         // whether a guide exists; otherwise a cold start re-parses the full file.
         var have = guide != null
-        if (!have) Guide.load(trimmed)?.let { g -> have = true; main.post { setGuide(g) } }
+        if (!have) Guide.load(trimmed)?.let { g -> have = true; onMain { setGuide(g) } }
         val changed = try {
-            store.refresh(BuildConfig.GUIDE_URL, GUIDE_FILE) { f -> f.inputStream().use { it.read() == 0x1f && it.read() == 0x8b } }
+            store.refresh(url, GUIDE_FILE, Guide::looksValid)
         } catch (_: Exception) {
             false // Keep whatever guide we have; the next refresh tries again.
         }
@@ -317,7 +349,7 @@ class MainActivity : Activity() {
         val g = runCatching { raw.inputStream().use { Guide.parse(it, ids, now - 3 * HOUR, now + 36 * HOUR) } }.getOrNull() ?: return
         runCatching { g.save(trimmed) }
         prefs.edit().putInt("guideIds", idsKey).apply()
-        main.post { setGuide(g) }
+        onMain { setGuide(g) }
     }
 
     private val refreshData = object : Runnable {
@@ -416,12 +448,17 @@ class MainActivity : Activity() {
     private fun mediaItem(ch: Channel): MediaItem {
         val cached = resolved[ch.id]?.takeIf { SystemClock.elapsedRealtime() - it.second < RESOLVED_TTL_MS }?.first
         loadedFromCache = cached != null
-        // JioTV serves most channels as DASH with Widevine, but about a fifth as plain
-        // HLS (".m3u8", no DRM). Reading HLS as DASH fails with "manifest malformed".
-        val hls = ch.mpd.substringBefore('?').endsWith(".m3u8")
-        val b = MediaItem.Builder().setMediaId(ch.id).setUri(cached ?: Uri.parse(ch.mpd))
-            .setMimeType(if (hls) MimeTypes.APPLICATION_M3U8 else MimeTypes.APPLICATION_MPD)
-        if (!hls) ch.license?.let { b.setDrmConfiguration(MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID).setLicenseUri(it).build()) }
+        // DASH (JioTV Go's Widevine channels, marked in the playlist), HLS by its
+        // extension, and anything else (MPEG-TS and the like) left for ExoPlayer to detect.
+        // Reading HLS as DASH fails with "manifest malformed", so the type matters.
+        val path = ch.mpd.substringBefore('?').lowercase(Locale.ROOT)
+        val mime = when {
+            ch.dash -> MimeTypes.APPLICATION_MPD
+            path.endsWith(".m3u8") || path.endsWith(".m3u") -> MimeTypes.APPLICATION_M3U8
+            else -> null
+        }
+        val b = MediaItem.Builder().setMediaId(ch.id).setUri(cached ?: Uri.parse(ch.mpd)).setMimeType(mime)
+        if (ch.dash) ch.license?.let { b.setDrmConfiguration(MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID).setLicenseUri(it).build()) }
         return b.build()
     }
 
@@ -588,11 +625,11 @@ class MainActivity : Activity() {
             else -> -1
         }
         if (digit >= 0) {
-            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0 && !settingsOpen) addDigit(digit)
+            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0 && !settingsOpen && !setupOpen) addDigit(digit)
             return true
         }
         val key = keyOf(code) ?: return super.dispatchKeyEvent(e)
-        if (key == Key.OK && !settingsOpen && !home) {
+        if (key == Key.OK && !settingsOpen && !setupOpen && !home) {
             // Short press acts on release. Holding it 0.6 s toggles a favourite: timed
             // here, because some remotes don't repeat a held OK key.
             if (e.action == KeyEvent.ACTION_DOWN) {
@@ -638,9 +675,15 @@ class MainActivity : Activity() {
     }
 
     private fun press(key: Key) {
+        if (setupOpen) { pressSetup(key); return }
         if (settingsOpen) { pressSettings(key); return }
         if (groups.isEmpty()) {
-            if (key == Key.BACK) exitOrWarn()
+            // Nothing loaded (yet): the only useful thing to do is fix the playlist.
+            when (key) {
+                Key.BACK -> exitOrWarn()
+                Key.OK, Key.MENU -> openSetup()
+                else -> Unit
+            }
             return
         }
         when {
@@ -687,6 +730,7 @@ class MainActivity : Activity() {
                 }
                 is Item.Cat -> { showWatching(); openPanel(item.group) }
                 Item.Settings -> openSettings()
+                Item.Sources -> openSetup()
                 null -> Unit
             }
         }
@@ -737,6 +781,15 @@ class MainActivity : Activity() {
             Key.CH_UP, Key.CH_DOWN, Key.INFO, Key.GUIDE, Key.MENU -> Unit
         }
         renderSettings()
+    }
+
+    private fun pressSetup(key: Key) {
+        when (key) {
+            Key.BACK -> if (source.playlistUrl.isEmpty()) exitOrWarn() else closeSetup()
+            // No network when it opened: OK tries again.
+            Key.OK -> if (setupServer?.address == null) { setupServer?.start(); renderSetup() }
+            else -> Unit
+        }
     }
 
     private fun <T> toggle(set: MutableSet<T>, item: T) {
@@ -879,6 +932,81 @@ class MainActivity : Activity() {
         settingsView.visibility = View.VISIBLE
     }
 
+    private fun openSetup() {
+        setupOpen = true
+        closePanel()
+        val server = setupServer ?: SetupServer({ source }, ::applySource).also { setupServer = it }
+        server.start()
+        renderSetup()
+        setupView.visibility = View.VISIBLE
+    }
+
+    private fun closeSetup() {
+        setupOpen = false
+        setupServer?.stop()
+        setupView.visibility = View.GONE
+    }
+
+    /**
+     * A playlist and guide entered on the setup page. A different source starts afresh:
+     * the old channels, guide and caches are dropped and the new playlist is loaded.
+     */
+    private fun applySource(s: Source) {
+        closeSetup()
+        if (s == source && playlist != null) { showNote("Playlist unchanged"); return }
+        source = s
+        prefs.edit()
+            .putString("playlistUrl", s.playlistUrl)
+            .putString("guideUrl", s.guideUrl)
+            .remove("guideIds").remove("last").remove("lastGroup")
+            .apply()
+        sourceGen++
+        for (r in listOf(startRun, retryRun, stallRun, loadingRun)) main.removeCallbacks(r)
+        player?.let { it.stop(); it.clearMediaItems() }
+        playing = null
+        previous = null
+        playlist = null
+        guide = null
+        groups = emptyList()
+        resolved.clear()
+        retries = 0
+        loadFailures = 0
+        if (!home) showHome()
+        hr = 1
+        lt = 0
+        hc = 0
+        render()
+        showStatus("Loading your playlist…")
+        onIo {
+            store.forget(FULL_FILE)
+            store.forget(GUIDE_FILE)
+            File(filesDir, TRIMMED_GUIDE_FILE).delete()
+        }
+        loadData()
+    }
+
+    private fun renderSetup() {
+        val address = setupServer?.address
+        val first = source.playlistUrl.isEmpty()
+        suTitle.text = if (first) "Add your playlist" else "Change your playlist"
+        if (address == null) {
+            suSteps.text = "The TV isn’t connected to a network.\nConnect it, then press OK to try again."
+            suAddress.visibility = View.GONE
+            suQr.visibility = View.INVISIBLE
+        } else {
+            suSteps.text = "1   Scan the code with your phone’s camera\n" +
+                "2   Paste your playlist’s URL (M3U), and a guide URL if you have one\n" +
+                "3   Tap Save, and the TV loads it straight away"
+            suAddress.text = "or open  $address"
+            suAddress.visibility = View.VISIBLE
+            suQr.setImageBitmap(SetupServer.qr(address, (240 * resources.displayMetrics.density).toInt()))
+            suQr.visibility = View.VISIBLE
+        }
+        suCurrent.text = if (first) "Your phone or laptop must be on the same network as the TV." else
+            "Now: ${source.playlistUrl}" + if (source.guideUrl.isNotEmpty()) "\nGuide: ${source.guideUrl}" else ""
+        suHint.text = if (first) "Back  exit" else "Back  keep the current playlist"
+    }
+
     /** Saves the choices and rebuilds the categories and the trimmed guide. */
     private fun closeSettings() {
         settingsOpen = false
@@ -951,7 +1079,7 @@ class MainActivity : Activity() {
 
     private fun homeRows(): List<HomeRow> {
         val tab = homeTabs().getOrNull(lt) ?: return emptyList()
-        if (tab == TAB_SETTINGS) return listOf(HomeRow("SETTINGS", listOf(Item.Settings)))
+        if (tab == TAB_SETTINGS) return listOf(HomeRow("SETTINGS", listOf(Item.Settings, Item.Sources)))
         val cats = groups.indices.filter { groups[it].language == tab }.map { Item.Cat(it) }
         if (tab == Catalog.FOR_YOU) {
             val pl = playlist
@@ -1000,6 +1128,10 @@ class MainActivity : Activity() {
             hTime.text = now?.let { "${time(it.start)} – ${time(it.stop)}" } ?: ""
             setProgress(hProg, now)
             hNext.text = next?.let { "Next ${time(it.start)}   ${it.title}" } ?: ""
+        } else {
+            // Nothing playing yet, e.g. a new playlist still loading.
+            for (v in listOf(hWhere, hName, hNow, hTime, hNext)) v.text = ""
+            hProg.visibility = View.INVISIBLE
         }
 
         val tabsList = homeTabs()
@@ -1060,6 +1192,11 @@ class MainActivity : Activity() {
                     Item.Settings -> {
                         tile.name.text = "Languages & genres"
                         tile.count.text = "Choose which channels appear"
+                        showChips(tile, emptyList())
+                    }
+                    Item.Sources -> {
+                        tile.name.text = "Playlist & guide"
+                        tile.count.text = Uri.parse(source.playlistUrl).host ?: "Add a playlist"
                         showChips(tile, emptyList())
                     }
                 }
@@ -1304,6 +1441,13 @@ class MainActivity : Activity() {
         sLangPos = findViewById(R.id.sLangPos)
         sGenrePos = findViewById(R.id.sGenrePos)
         sPreview = findViewById(R.id.sPreview)
+        setupView = findViewById(R.id.setup)
+        suTitle = findViewById(R.id.suTitle)
+        suSteps = findViewById(R.id.suSteps)
+        suAddress = findViewById(R.id.suAddress)
+        suCurrent = findViewById(R.id.suCurrent)
+        suHint = findViewById(R.id.suHint)
+        suQr = findViewById(R.id.suQr)
         status = findViewById(R.id.status)
         hints = findViewById(R.id.hints)
         note = findViewById(R.id.note)

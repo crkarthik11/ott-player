@@ -16,6 +16,12 @@ class Store(context: Context) {
 
     fun cached(name: String): File? = File(dir, name).takeIf { it.isFile && it.length() > 0 }
 
+    /** Deletes [name] and what's known about it, so the next refresh downloads it afresh. */
+    fun forget(name: String) {
+        File(dir, name).delete()
+        prefs.edit().remove("$name.etag").remove("$name.modified").apply()
+    }
+
     /**
      * Downloads [url] into [name] if it changed. A download that fails [valid] is
      * discarded, so a bad response never replaces a good cached copy.

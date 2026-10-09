@@ -449,6 +449,90 @@
             android:textSize="12sp" />
     </LinearLayout>
 
+    <!-- Setup: the playlist and guide, entered from a phone via a QR code. Opaque, over everything. -->
+    <LinearLayout
+        android:id="@+id/setup"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#0B0E13"
+        android:clickable="true"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="64dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:letterSpacing="0.12"
+                android:text="PLAYLIST"
+                android:textColor="#A3ACB8"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/suTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:textColor="#EDEFF2"
+                android:textSize="26sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/suSteps"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:lineSpacingExtra="6dp"
+                android:textColor="#C9CFD6"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/suAddress"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:background="@drawable/bg_pill"
+                android:fontFamily="monospace"
+                android:paddingHorizontal="14dp"
+                android:paddingVertical="7dp"
+                android:textColor="#F2A93B"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/suCurrent"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="22dp"
+                android:ellipsize="middle"
+                android:maxLines="2"
+                android:textColor="#A3ACB8"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/suHint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:textColor="#A3ACB8"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <ImageView
+            android:id="@+id/suQr"
+            android:layout_width="240dp"
+            android:layout_height="240dp"
+            android:layout_marginStart="48dp"
+            android:contentDescription="QR code for the setup page" />
+    </LinearLayout>
+
     <LinearLayout
         android:id="@+id/hints"
         android:layout_width="wrap_content"
